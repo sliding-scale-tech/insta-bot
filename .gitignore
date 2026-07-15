@@ -1,0 +1,32 @@
+# Secret keys — never commit
+.env
+
+# Chrome browser session (contains Instagram login cookies)
+chrome_profile/
+
+# Bot runtime data (DM history, token usage, PID file)
+data/
+
+# Debug screenshots and session reports
+debug_output/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Logs
+*.log
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# VS Code
+.vscode/
+
+# Windows
+Thumbs.db
+desktop.ini
