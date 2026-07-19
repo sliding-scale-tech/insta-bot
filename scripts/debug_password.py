@@ -1,21 +1,26 @@
 """Debug password popup after Continue click."""
 
+import sys
 import time
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
-from browser_auth import get_bot_context
-from env_utils import get_env_credentials
+from instagram_bot.auth.browser import get_bot_context
+from instagram_bot.config.settings import ENV_PATH, get_credentials
 
-load_dotenv(override=True)
+load_dotenv(ENV_PATH, override=True)
 DEBUG = Path(__file__).parent / "debug_output"
 
 
 def main():
     DEBUG.mkdir(exist_ok=True)
-    _, _, password = get_env_credentials()
+    _, _, password = get_credentials()
 
     with sync_playwright() as pw:
         browser, _, page = get_bot_context(pw)

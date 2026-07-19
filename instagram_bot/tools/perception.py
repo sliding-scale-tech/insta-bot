@@ -7,6 +7,7 @@ from instagram_bot.perception.page_parser import (
     parse_current_post,
     parse_feed_posts,
     parse_page_state,
+    parse_replies,
 )
 from instagram_bot.tools.context import ToolContext
 
@@ -15,16 +16,27 @@ def observe_page_state(ctx: ToolContext) -> dict:
     return parse_page_state(ctx.page)
 
 
-def observe_feed(ctx: ToolContext, limit: int = 8) -> dict:
+def observe_feed(ctx: ToolContext, limit: int = 6) -> dict:
     posts = parse_feed_posts(ctx.page, limit=limit)
     return {"posts": posts, "count": len(posts), **parse_page_state(ctx.page)}
 
 
 def observe_current_post(ctx: ToolContext) -> dict:
-    return parse_current_post(ctx.page)
+    post = parse_current_post(ctx.page)
+    # Trim what actually gets sent back into Gemini's history — the parser can
+    # return up to 800 chars of caption, more than the model needs to decide.
+    if post.get("caption"):
+        post["caption"] = post["caption"][:500]
+    return post
 
 
-def observe_comments(ctx: ToolContext, limit: int = 15) -> dict:
+def observe_replies(ctx: ToolContext, comment_index: int = 0, limit: int = 10) -> dict:
+    """Expand and read replies for a specific comment by index."""
+    replies = parse_replies(ctx.page, comment_index=comment_index, limit=limit)
+    return {"comment_index": comment_index, "replies": replies, "count": len(replies), **parse_page_state(ctx.page)}
+
+
+def observe_comments(ctx: ToolContext, limit: int = 10) -> dict:
     comments = parse_comments(ctx.page, limit=limit)
     return {"comments": comments, "count": len(comments), **parse_page_state(ctx.page)}
 

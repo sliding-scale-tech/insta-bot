@@ -8,7 +8,6 @@ from playwright.sync_api import sync_playwright
 
 from instagram_bot.auth.browser import (
     dismiss_notifications_popup,
-    ensure_browser_session,
     ensure_instagram_ready,
     get_bot_context,
     has_session_cookie,
@@ -199,7 +198,8 @@ def comment_on_current_post(page) -> None:
 
 
 def run_browser_bot() -> None:
-    ensure_browser_session()
+    # get_bot_context() already calls ensure_browser_session() internally —
+    # calling it again here was redundant and could overlap a session check.
     with sync_playwright() as playwright:
         browser, context, page = get_bot_context(playwright)
         if not has_session_cookie(context):
@@ -211,14 +211,23 @@ def run_browser_bot() -> None:
 
         print("Using browser mode (Chrome)...\n")
         ensure_instagram_ready(page)
-        go_to_hashtag_explore(page, HASHTAG_TO_SEARCH)
-        post_url = open_first_post(page)
 
+        # MAX_COMMENTS used to be treated as a boolean (>0 => exactly one comment,
+        # regardless of value). This honors the configured count by re-opening the
+        # hashtag feed's first post for each iteration.
         comment_count = 0
-        if MAX_COMMENTS > 0:
+        post_url = ""
+        seen_urls: set[str] = set()
+        for _ in range(max(MAX_COMMENTS, 0)):
+            go_to_hashtag_explore(page, HASHTAG_TO_SEARCH)
+            post_url = open_first_post(page)
+            if post_url in seen_urls:
+                print("Same post came up again — nothing new to comment on.")
+                break
+            seen_urls.add(post_url)
             wait_human(2, 4)
             comment_on_current_post(page)
-            comment_count = 1
+            comment_count += 1
             wait_human(3, 6)
 
         browser.close()

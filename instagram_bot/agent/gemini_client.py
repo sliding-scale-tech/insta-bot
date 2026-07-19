@@ -98,7 +98,10 @@ Respond ONLY with this JSON — no markdown, no extra text:
         response = self._client.models.generate_content(
             model=self._model,
             contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.3),
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
 
         if response.usage_metadata:
@@ -164,7 +167,10 @@ Reply with ONLY the comment text, nothing else."""
         response = self._client.models.generate_content(
             model=self._model,
             contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.85),
+            config=types.GenerateContentConfig(
+                temperature=0.85,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
         if response.usage_metadata:
             u = response.usage_metadata
@@ -210,7 +216,10 @@ Reply with ONLY the reply text, nothing else."""
         response = self._client.models.generate_content(
             model=self._model,
             contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.85),
+            config=types.GenerateContentConfig(
+                temperature=0.85,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
         if response.usage_metadata:
             u = response.usage_metadata
@@ -247,7 +256,10 @@ Reply with ONLY the message text, nothing else."""
         response = self._client.models.generate_content(
             model=self._model,
             contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.9),
+            config=types.GenerateContentConfig(
+                temperature=0.9,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
         if response.usage_metadata:
             u = response.usage_metadata
@@ -285,7 +297,10 @@ Reply with ONLY the reply text, nothing else."""
         response = self._client.models.generate_content(
             model=self._model,
             contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.85),
+            config=types.GenerateContentConfig(
+                temperature=0.85,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
         if response.usage_metadata:
             u = response.usage_metadata
@@ -304,11 +319,23 @@ Reply with ONLY the reply text, nothing else."""
             types.Content(role="user", parts=[types.Part(text=user_message)])
         )
 
-        # Keep history bounded: first message (system+kickoff) + last 8 exchanges (16 msgs)
-        # This prevents unbounded context growth that causes 429s and high costs
+        # Keep history bounded: first message (system+kickoff) + up to ~8 recent exchanges.
+        # This prevents unbounded context growth that causes 429s and high costs.
+        # The cut point must land on a plain user text turn (never mid function_call/
+        # function_response pair), otherwise Gemini rejects the next request with a 400.
         _MAX_HISTORY = 17  # 1 kickoff + 8 exchanges × 2 messages each
         if len(self._history) > _MAX_HISTORY:
-            self._history = [self._history[0]] + self._history[-(_MAX_HISTORY - 1):]
+            cutoff = len(self._history) - (_MAX_HISTORY - 1)
+            while cutoff < len(self._history):
+                content = self._history[cutoff]
+                parts = content.parts or []
+                is_safe_cut = content.role == "user" and all(
+                    getattr(p, "function_response", None) is None for p in parts
+                )
+                if is_safe_cut:
+                    break
+                cutoff += 1
+            self._history = [self._history[0]] + self._history[cutoff:]
 
         response = None
         for _attempt in range(5):
@@ -319,6 +346,7 @@ Reply with ONLY the reply text, nothing else."""
                     config=types.GenerateContentConfig(
                         tools=self._tools,
                         temperature=0.7,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
                     ),
                 )
                 break

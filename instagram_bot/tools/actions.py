@@ -11,6 +11,20 @@ from instagram_bot.tools.context import ToolContext
 from instagram_bot.tools.human import wait_human
 
 
+def _visible(locator, timeout: int = 2000) -> bool:
+    """Wait up to `timeout`ms for a locator to become visible. Returns False on timeout.
+
+    Locator.is_visible(timeout=...) does NOT actually wait — it checks the current
+    state instantly and the timeout kwarg is ignored, causing false negatives on
+    elements that render a moment later. This actually polls.
+    """
+    try:
+        locator.wait_for(state="visible", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
 def dismiss_all_popups(ctx: ToolContext) -> dict:
     dismiss_popups(ctx.page)
     dismiss_notifications_popup(ctx.page)
@@ -23,9 +37,9 @@ def _dismiss_repost_modal(page) -> bool:
     # We detect a repost modal by requiring the dialog to contain repost-related text.
     try:
         dialog = page.locator('div[role="dialog"]:has-text("Repost"), div[role="dialog"]:has-text("Share to"), div[role="dialog"]:has-text("Add to story")').first
-        if dialog.is_visible(timeout=1000):
+        if _visible(dialog, 1000):
             close_btn = dialog.locator('svg[aria-label="Close"]').first
-            if close_btn.is_visible(timeout=1000):
+            if _visible(close_btn, 1000):
                 close_btn.click(force=True)
                 time.sleep(0.8)
                 return True
@@ -126,9 +140,9 @@ def reply_to_comment(
     page = ctx.page
     dismiss_all_popups(ctx)
 
-    reply_buttons = page.locator(
-        'div[role="button"]:has-text("Reply"), span:has-text("Reply")'
-    )
+    # A single specific selector — "div[role=button], span" both matching the same
+    # control (wrapper + inner text span) would double-count and shift every index.
+    reply_buttons = page.locator('div[role="button"]:has-text("Reply")')
     if reply_buttons.count() == 0:
         raise RuntimeError("No Reply buttons visible on this post")
 
@@ -171,7 +185,7 @@ def like_post(ctx: ToolContext) -> dict:
 
     # Check if already liked (aria-label="Unlike" means it's already liked)
     already_liked = page.locator('svg[aria-label="Unlike"]').first
-    if already_liked.is_visible(timeout=1000):
+    if _visible(already_liked, 1000):
         return {"success": True, "liked": "post", "already_liked": True, "post_url": page.url}
 
     icon = page.locator('svg[aria-label="Like"]').first
@@ -183,8 +197,8 @@ def like_post(ctx: ToolContext) -> dict:
         icon.click(force=True)
     wait_human(1, 2)
 
-    key = f"post::{page.url}"
-    ctx.memory.setdefault("liked_items", []).append(key)
+    # liked_items bookkeeping is owned by runner.py (single canonical key format,
+    # used for both the pre-call dedup guard and the post-call record).
     return {"success": True, "liked": "post", "post_url": page.url}
 
 
@@ -197,7 +211,7 @@ def like_comment(ctx: ToolContext, comment_index: int = 0) -> dict:
     for selector in ('div[role="dialog"] ul', 'article ul'):
         try:
             panel = page.locator(selector).first
-            if panel.count() and panel.is_visible(timeout=1500):
+            if panel.count() and _visible(panel, 1500):
                 panel.evaluate(
                     "(el, n) => { el.scrollTop = Math.min(el.scrollHeight, n * 120); }",
                     comment_index,
@@ -229,8 +243,6 @@ def like_comment(ctx: ToolContext, comment_index: int = 0) -> dict:
         target.click(force=True)
     wait_human(0.8, 1.5)
 
-    key = f"comment::{page.url}::{idx}"
-    ctx.memory.setdefault("liked_items", []).append(key)
     return {"success": True, "liked": "comment", "comment_index": idx, "post_url": page.url}
 
 
@@ -240,11 +252,12 @@ def like_reply(ctx: ToolContext, comment_index: int = 0, reply_index: int = 0) -
     dismiss_all_popups(ctx)
     wait_human(0.3, 0.7)
 
-    # Expand replies on the target comment first
+    # Expand replies on the target comment first.
+    # NOTE: `div:has-text(...)` matches every ancestor div containing the text too,
+    # not just the clickable control — that inflates .count() and breaks indexing.
     try:
         view_replies = page.locator(
-            'span:has-text("View replies"), button:has-text("View replies"), '
-            'div:has-text("View replies")'
+            'div[role="button"]:has-text("View replies"), button:has-text("View replies")'
         )
         if view_replies.count() > comment_index:
             btn = view_replies.nth(comment_index)
@@ -273,8 +286,6 @@ def like_reply(ctx: ToolContext, comment_index: int = 0, reply_index: int = 0) -
         target.click(force=True)
     wait_human(0.8, 1.5)
 
-    key = f"reply::{page.url}::{comment_index}::{reply_index}"
-    ctx.memory.setdefault("liked_items", []).append(key)
     return {
         "success": True,
         "liked": "reply",
@@ -291,9 +302,12 @@ def ai_comment_on_post(ctx: ToolContext) -> dict:
     if ctx.gemini is None:
         raise RuntimeError("Gemini agent not available for AI comments")
 
+    # Respect the session-wide like cap — runner.py sets this before every step so
+    # this internal liking can't silently blow past MAX_LIKES_PER_SESSION.
+    likes_budget = min(2, ctx.memory.get("likes_remaining", 2))
     comments_liked: list[int] = []
     for idx in (0, 2, 1):
-        if len(comments_liked) >= 2:
+        if len(comments_liked) >= likes_budget:
             break
         try:
             like_comment(ctx, idx)
@@ -397,14 +411,14 @@ def follow_user(ctx: ToolContext, username: str) -> dict:
     following_btn = page.locator(
         'div[role="button"]:has-text("Following"), button:has-text("Following")'
     ).first
-    if following_btn.is_visible(timeout=2000):
+    if _visible(following_btn, 2000):
         return {"success": True, "already_following": True, "username": username}
 
     follow_btn = page.locator(
         'div[role="button"]:has-text("Follow"):not(:has-text("Following")), '
         'button:has-text("Follow"):not(:has-text("Following"))'
     ).first
-    if not follow_btn.is_visible(timeout=5000):
+    if not _visible(follow_btn, 5000):
         return {"success": False, "reason": "Follow button not found", "username": username}
 
     follow_btn.click(force=True)
@@ -430,7 +444,7 @@ def unfollow_user(ctx: ToolContext, username: str) -> dict:
     following_btn = page.locator(
         'div[role="button"]:has-text("Following"), button:has-text("Following")'
     ).first
-    if not following_btn.is_visible(timeout=4000):
+    if not _visible(following_btn, 4000):
         return {"success": False, "reason": "Not following this user", "username": username}
 
     following_btn.click(force=True)
@@ -440,7 +454,7 @@ def unfollow_user(ctx: ToolContext, username: str) -> dict:
     unfollow_confirm = page.locator(
         'button:has-text("Unfollow"), div[role="button"]:has-text("Unfollow")'
     ).first
-    if unfollow_confirm.is_visible(timeout=3000):
+    if _visible(unfollow_confirm, 3000):
         unfollow_confirm.click(force=True)
         wait_human(1, 2)
 
@@ -488,7 +502,7 @@ def send_dm(ctx: ToolContext, username: str, text: str) -> dict:
     for sel in msg_selectors:
         try:
             btn = page.locator(sel).first
-            if btn.is_visible(timeout=3000):
+            if _visible(btn, 3000):
                 btn.click(force=True)
                 clicked = True
                 wait_human(1.5, 3)
@@ -524,7 +538,7 @@ def send_dm(ctx: ToolContext, username: str, text: str) -> dict:
     wait_human(0.5, 1)
 
     send_btn = page.locator('div[role="button"]:has-text("Send"), button:has-text("Send")').first
-    if send_btn.is_visible(timeout=2000):
+    if _visible(send_btn, 2000):
         send_btn.click(force=True)
     else:
         page.keyboard.press("Enter")
@@ -590,7 +604,7 @@ def reply_to_dm(ctx: ToolContext, thread_index: int = 0, text: str = "") -> dict
     wait_human(0.4, 0.8)
 
     send_btn = page.locator('div[role="button"]:has-text("Send"), button:has-text("Send")').first
-    if send_btn.is_visible(timeout=2000):
+    if _visible(send_btn, 2000):
         send_btn.click(force=True)
     else:
         page.keyboard.press("Enter")
@@ -598,13 +612,341 @@ def reply_to_dm(ctx: ToolContext, thread_index: int = 0, text: str = "") -> dict
     return {"success": True, "replied_in_thread": thread_index, "text": text}
 
 
+def save_post(ctx: ToolContext) -> dict:
+    """Bookmark/save the currently open post."""
+    page = ctx.page
+    dismiss_all_popups(ctx)
+    wait_human(0.3, 0.6)
+
+    # Check if already saved (aria-label="Remove" on save icon means saved)
+    already_saved = page.locator('svg[aria-label="Remove"]').first
+    if _visible(already_saved, 1000):
+        return {"success": True, "saved": True, "already_saved": True, "post_url": page.url}
+
+    save_icon = page.locator('svg[aria-label="Save"]').first
+    if not _visible(save_icon, 5000):
+        return {"success": False, "reason": "Save button not found", "post_url": page.url}
+
+    parent = save_icon.locator("xpath=ancestor::*[@role='button'][1]")
+    if parent.count():
+        parent.first.click(force=True)
+    else:
+        save_icon.click(force=True)
+    wait_human(0.8, 1.5)
+
+    return {"success": True, "saved": True, "post_url": page.url}
+
+
+def share_post_via_dm(ctx: ToolContext, username: str) -> dict:
+    """Share the currently open post to a user via DM using the share/send button."""
+    page = ctx.page
+    dismiss_all_popups(ctx)
+    wait_human(0.3, 0.6)
+
+    # Click the paper-plane / share icon on the post
+    share_selectors = [
+        'svg[aria-label="Share Post"]',
+        'svg[aria-label="Share"]',
+        'div[role="button"][aria-label*="share" i]',
+    ]
+    clicked = False
+    for sel in share_selectors:
+        try:
+            el = page.locator(sel).first
+            if _visible(el, 2000):
+                parent = el.locator("xpath=ancestor::*[@role='button'][1]")
+                if parent.count():
+                    parent.first.click(force=True)
+                else:
+                    el.click(force=True)
+                clicked = True
+                wait_human(1, 1.5)
+                break
+        except Exception:
+            continue
+
+    if not clicked:
+        return {"success": False, "reason": "Share button not found on post", "post_url": page.url}
+
+    # In the share sheet, search for the username
+    try:
+        search = page.locator('input[placeholder*="Search"], input[aria-label*="Search"]').first
+        if _visible(search, 3000):
+            search.fill(username)
+            wait_human(1.5, 2.5)
+
+            # Click the user result
+            result = page.locator(
+                f'div[role="button"]:has-text("{username}"), span:has-text("{username}")'
+            ).first
+            if _visible(result, 3000):
+                result.click(force=True)
+                wait_human(0.8, 1.5)
+    except Exception:
+        pass
+
+    # Click Send
+    send_btn = page.locator('div[role="button"]:has-text("Send"), button:has-text("Send")').first
+    if _visible(send_btn, 3000):
+        send_btn.click(force=True)
+        wait_human(1, 2)
+        return {"success": True, "shared_to": username, "post_url": page.url}
+
+    return {"success": False, "reason": "Send button not found in share sheet", "post_url": page.url}
+
+
+def post_photo(ctx: ToolContext, image_path: str, caption: str = "") -> dict:
+    """Upload a photo/video from disk and post it to Instagram with a caption.
+
+    image_path: relative to project root (e.g. 'media/house.jpg') or absolute.
+    caption: post caption text.
+    """
+    from pathlib import Path
+    from instagram_bot.config.settings import PROJECT_ROOT
+
+    page = ctx.page
+    dismiss_all_popups(ctx)
+
+    # Resolve path
+    p = Path(image_path)
+    if not p.is_absolute():
+        p = PROJECT_ROOT / image_path
+    if not p.exists():
+        # Auto-pick the first available image in media/ rather than failing outright
+        media_dir = PROJECT_ROOT / "media"
+        candidates = sorted(
+            list(media_dir.glob("*.jpg")) + list(media_dir.glob("*.jpeg")) +
+            list(media_dir.glob("*.png")) + list(media_dir.glob("*.mp4"))
+        )
+        if candidates:
+            p = candidates[0]
+        else:
+            return {"success": False, "reason": f"File not found: {p} and no images in media/ folder"}
+
+    # ── Step 1: Click the Create (+) button in the sidebar ───────────────────
+    create_selectors = [
+        'svg[aria-label="New post"]',
+        'svg[aria-label="Create"]',
+        'a[aria-label="New post"]',
+    ]
+    clicked = False
+    for sel in create_selectors:
+        try:
+            el = page.locator(sel).first
+            if el.is_visible(timeout=3000):
+                parent = el.locator("xpath=ancestor::*[@role='button'][1] | ancestor::a[1]").first
+                try:
+                    parent.click(force=True, timeout=3000)
+                except Exception:
+                    el.click(force=True, timeout=3000)
+                clicked = True
+                wait_human(1.5, 2.5)
+                break
+        except Exception:
+            continue
+
+    if not clicked:
+        return {"success": False, "reason": "Create/New post (+) button not found in sidebar"}
+
+    # ── Step 2: Wait for dialog to load, then select the file ────────────────
+    # The Create dialog shows a loading spinner first — wait for content
+    try:
+        page.locator('div[role="dialog"]').first.wait_for(state="visible", timeout=8000)
+    except Exception:
+        return {"success": False, "reason": "Create dialog did not open"}
+
+    # Wait for "Select from computer" button to appear (spinner must finish)
+    select_btn = None
+    for sel in [
+        'button:has-text("Select from computer")',
+        'div[role="button"]:has-text("Select from computer")',
+    ]:
+        try:
+            el = page.locator(sel).first
+            el.wait_for(state="visible", timeout=10000)
+            select_btn = el
+            break
+        except Exception:
+            continue
+
+    if select_btn is None:
+        return {"success": False, "reason": "Select from computer button did not appear in Create dialog"}
+
+    # Register filechooser handler BEFORE clicking the trigger
+    file_chosen = False
+
+    def _handle_chooser(chooser):
+        nonlocal file_chosen
+        chooser.set_files(str(p))
+        file_chosen = True
+
+    page.once("filechooser", _handle_chooser)
+    select_btn.click(force=True)
+    # Give the file chooser time to fire and the preview to start rendering
+    wait_human(2, 3)
+
+    if not file_chosen:
+        # Fallback: directly set the hidden file input
+        try:
+            inp = page.locator('input[type="file"]').first
+            if inp.count():
+                inp.set_input_files(str(p))
+                file_chosen = True
+                wait_human(2, 3)
+        except Exception:
+            pass
+
+    if not file_chosen:
+        return {"success": False, "reason": "File chooser did not fire — could not upload image"}
+
+    # Wait for the image preview to render inside the dialog
+    try:
+        page.locator('div[role="dialog"] img, div[role="dialog"] canvas').first.wait_for(
+            state="visible", timeout=8000
+        )
+    except Exception:
+        pass
+    wait_human(1, 2)
+
+    # ── Step 3: Advance through Crop → Filters → Caption (click Next twice) ──
+    # All clicks scoped to the dialog so we never accidentally hit background buttons
+    def _click_dialog_next() -> bool:
+        dialog = page.locator('div[role="dialog"]').first
+        for sel in [
+            'div[role="button"]:has-text("Next")',
+            'button:has-text("Next")',
+        ]:
+            try:
+                btn = dialog.locator(sel).first
+                if btn.is_visible(timeout=4000):
+                    btn.click(force=True)
+                    wait_human(1.5, 2.5)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    # Click Next: Crop → Filters
+    if not _click_dialog_next():
+        return {"success": False, "reason": "Next button not found at Crop step"}
+
+    # Click Next: Filters → Caption
+    if not _click_dialog_next():
+        return {"success": False, "reason": "Next button not found at Filters step"}
+
+    # ── Step 4: Type the caption ──────────────────────────────────────────────
+    if caption:
+        dialog = page.locator('div[role="dialog"]').first
+        for sel in [
+            'div[aria-label*="caption" i][contenteditable="true"]',
+            'textarea[aria-label*="caption" i]',
+            'div[contenteditable="true"]',
+        ]:
+            try:
+                inp = dialog.locator(sel).first
+                if inp.is_visible(timeout=5000):
+                    inp.click(force=True)
+                    wait_human(0.5, 0.8)
+                    page.keyboard.type(caption, delay=55)
+                    wait_human(0.8, 1.5)
+                    break
+            except Exception:
+                continue
+
+    # ── Step 5: Click Share ───────────────────────────────────────────────────
+    dialog = page.locator('div[role="dialog"]').first
+    for sel in [
+        'div[role="button"]:has-text("Share")',
+        'button:has-text("Share")',
+    ]:
+        try:
+            share_btn = dialog.locator(sel).first
+            if share_btn.is_visible(timeout=6000):
+                share_btn.click(force=True)
+                # Wait for Instagram to upload and navigate away from dialog
+                wait_human(4, 6)
+                return {"success": True, "posted": True, "image": str(p.name), "caption": caption[:100]}
+        except Exception:
+            continue
+
+    return {"success": False, "reason": "Share button not found at Caption step", "image": str(p)}
+
+
+def list_media_files(ctx: ToolContext) -> dict:
+    """Return all image/video files in the project's media/ folder."""
+    from instagram_bot.config.settings import PROJECT_ROOT
+    media_dir = PROJECT_ROOT / "media"
+    if not media_dir.exists():
+        return {"files": [], "note": "media/ folder does not exist — create it and add images there"}
+    exts = {".jpg", ".jpeg", ".png", ".gif", ".mp4", ".mov"}
+    files = sorted(p.name for p in media_dir.iterdir() if p.suffix.lower() in exts)
+    return {
+        "files": files,
+        "folder": str(media_dir),
+        "note": "Pass one of these filenames as image_path to post_photo, e.g. 'media/filename.jpg'",
+    }
+
+
+def follow_hashtag(ctx: ToolContext, hashtag: str) -> dict:
+    """Follow a hashtag — must be on the hashtag's explore page.
+
+    Note: Instagram removed the hashtag follow feature in late 2023. This function
+    navigates to the hashtag page and attempts to find the Follow button; if none
+    exists, it returns a clear not-supported message rather than silently failing.
+    """
+    from instagram_bot.tools.navigation import open_hashtag
+
+    page = ctx.page
+    hashtag = hashtag.lstrip("#").strip()
+
+    # Navigate to the hashtag page if not already there
+    if f"/explore/tags/{hashtag}" not in page.url:
+        open_hashtag(ctx, hashtag)
+
+    dismiss_all_popups(ctx)
+    wait_human(0.5, 1)
+
+    # Check if already following
+    following = page.locator('div[role="button"]:has-text("Following"), button:has-text("Following")').first
+    if _visible(following, 1500):
+        return {"success": True, "already_following_hashtag": True, "hashtag": hashtag}
+
+    # Click the Follow button for the hashtag
+    follow_selectors = [
+        'div[role="button"]:has-text("Follow"):not(:has-text("Following"))',
+        'button:has-text("Follow"):not(:has-text("Following"))',
+        '[aria-label*="follow" i][role="button"]',
+    ]
+    for sel in follow_selectors:
+        try:
+            btn = page.locator(sel).first
+            if _visible(btn, 2000):
+                btn.click(force=True)
+                wait_human(1, 2)
+                return {"success": True, "followed_hashtag": hashtag}
+        except Exception:
+            continue
+
+    # Instagram removed hashtag following in late 2023 — no Follow button will exist
+    return {
+        "success": False,
+        "reason": "Follow button not available — Instagram removed hashtag following in 2023/2024",
+        "hashtag": hashtag,
+        "note": "Use open_hashtag to browse posts tagged #" + hashtag + " instead",
+    }
+
+
 def ai_reply_to_dm(ctx: ToolContext, thread_index: int = 0) -> dict:
     """
     Check a DM thread — only reply if THEY sent the last message (they replied to us).
     Detects by checking if inbox preview starts with 'You:' (= we sent last).
-    Waits 30-60s like a human, then sends a short warm-lead reply in English.
+    Waits ~8-15s like a human, then sends a short warm-lead reply in English.
     """
     from instagram_bot.perception.page_parser import parse_inbox
+
+    if ctx.gemini is None:
+        raise RuntimeError("Gemini agent not available for AI DM replies")
+
     page = ctx.page
 
     # Go to inbox first to read previews (most reliable reply detection)
@@ -637,7 +979,7 @@ def ai_reply_to_dm(ctx: ToolContext, thread_index: int = 0) -> dict:
     if thread_href:
         try:
             link = page.locator(f'a[href="{thread_href}"]').first
-            if link.is_visible(timeout=2000):
+            if _visible(link, 2000):
                 link.click(force=True)
                 wait_human(1.5, 2.5)
                 clicked = True
@@ -689,8 +1031,9 @@ def ai_reply_to_dm(ctx: ToolContext, thread_index: int = 0) -> dict:
     thread_context = f"Conversation with @{username}:\n" + "\n".join(messages) if messages else f"@{username} replied (preview: {preview})"
     print(f"  [DM reply] Context: {thread_context[:200]}")
 
-    # Human-like delay before replying (30-60 seconds)
-    delay = random.uniform(30, 60)
+    # Human-like delay before replying — kept short so one DM reply doesn't eat a
+    # large chunk of the session's time budget.
+    delay = random.uniform(8, 15)
     print(f"  [DM reply] They replied — waiting {delay:.0f}s before responding...")
     time.sleep(delay)
 
@@ -717,7 +1060,7 @@ def ai_reply_to_dm(ctx: ToolContext, thread_index: int = 0) -> dict:
     wait_human(0.5, 1)
 
     send_btn = page.locator('div[role="button"]:has-text("Send"), button:has-text("Send")').first
-    if send_btn.is_visible(timeout=2000):
+    if _visible(send_btn, 2000):
         send_btn.click(force=True)
     else:
         page.keyboard.press("Enter")

@@ -8,17 +8,21 @@ from instagram_bot.config.settings import DATA_DIR, GEMINI_MODEL
 
 # Gemini 2.5 Flash pricing (per 1M tokens, USD)
 # Source: Google AI pricing as of 2025
+# NOTE: "thinking" tokens are billed at the same per-token rate as regular output
+# tokens (they're just candidates_token_count's thoughts_token_count sibling) —
+# there is no separate, higher-priced "thinking" tier. thinking_per_m mirrors
+# output_per_m below for that reason.
 _PRICING: dict[str, dict] = {
     "gemini-2.5-flash": {
         # prompts <= 200K context window
         "input_per_m": 0.075,
         "output_per_m": 0.30,
-        "thinking_per_m": 3.50,
+        "thinking_per_m": 0.30,
     },
     "gemini-2.5-pro": {
         "input_per_m": 1.25,
         "output_per_m": 10.00,
-        "thinking_per_m": 3.50,
+        "thinking_per_m": 10.00,
     },
     "gemini-2.0-flash": {
         "input_per_m": 0.10,
@@ -34,7 +38,7 @@ def _get_price(model: str) -> dict:
     for key, price in _PRICING.items():
         if key in model.lower():
             return price
-    return {"input_per_m": 0.075, "output_per_m": 0.30, "thinking_per_m": 3.50}
+    return {"input_per_m": 0.075, "output_per_m": 0.30, "thinking_per_m": 0.30}
 
 
 class TokenTracker:

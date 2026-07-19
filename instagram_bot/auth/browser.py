@@ -24,6 +24,12 @@ from instagram_bot.config.settings import (
 
 CHROME_PROFILE_DIR_STR = str(CHROME_PROFILE_DIR)
 
+# Tracks the Chrome process we spawned for manual login (if any), so it can be
+# torn down explicitly instead of being left running in the background — a
+# lingering logged-in Chrome window plus a later Playwright-launched Chrome
+# means two simultaneous sessions for the same account, which risks a ban.
+_launched_chrome_process: subprocess.Popen | None = None
+
 
 def get_chrome_executable() -> str | None:
     env_path = os.getenv("CHROME_PATH", "").strip()
@@ -53,6 +59,7 @@ def get_profile_directory() -> str:
 
 
 def launch_user_chrome(url: str = "https://www.instagram.com/accounts/login/") -> None:
+    global _launched_chrome_process
     chrome = get_chrome_executable()
     if not chrome:
         raise SystemExit(
@@ -68,7 +75,7 @@ def launch_user_chrome(url: str = "https://www.instagram.com/accounts/login/") -
 
     os.makedirs(profile_dir, exist_ok=True)
 
-    subprocess.Popen(
+    _launched_chrome_process = subprocess.Popen(
         [
             chrome,
             f"--remote-debugging-port={CHROME_DEBUG_PORT}",
@@ -93,6 +100,34 @@ def launch_user_chrome(url: str = "https://www.instagram.com/accounts/login/") -
     )
 
 
+def close_launched_chrome() -> None:
+    """Terminate the Chrome instance launched by `launch_user_chrome`, if any.
+
+    Closing a `connect_over_cdp` Browser handle only ends the CDP session — it
+    does NOT stop the external Chrome process that was spawned for it. Left
+    running, that Chrome keeps an authenticated Instagram tab open in the
+    background, and a subsequent `get_bot_context` launch opens a second,
+    independent Chrome logged into the same account at the same time.
+    """
+    global _launched_chrome_process
+    proc = _launched_chrome_process
+    _launched_chrome_process = None
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    for _ in range(20):
+        if not is_debug_port_open():
+            return
+        time.sleep(0.5)
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
 def connect_user_chrome(playwright):
     if not is_debug_port_open():
         print("Opening your Chrome browser...")
@@ -115,24 +150,6 @@ def get_browser_context(playwright):
     return browser, context, page
 
 
-def launch_browser(playwright):
-    return connect_user_chrome(playwright)
-
-
-def get_bot_page(playwright):
-    """Reuse the logged-in Chrome tab instead of creating a fresh session."""
-    browser = connect_user_chrome(playwright)
-    context = browser.contexts[0] if browser.contexts else browser.new_context()
-
-    for page in context.pages:
-        if "instagram.com" in page.url:
-            return browser, context, page
-
-    page = context.new_page()
-    page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
-    return browser, context, page
-
-
 def save_cookies_from_context(context) -> dict:
     cookies = context.cookies()
     cookie_map = {
@@ -147,14 +164,30 @@ def save_cookies_from_context(context) -> dict:
     return cookie_map
 
 
+_last_written_sessionid = ""
+
+
 def has_session_cookie(context=None) -> bool:
+    global _last_written_sessionid
     if has_saved_session():
         return True
     if context is None:
         return False
-    cookies = save_cookies_from_context(context)
-    sessionid = cookies.get("sessionid", "")
-    return bool(sessionid and len(sessionid) > 20)
+
+    # wait_for_login polls this once a second during manual login — read the live
+    # cookies without touching disk, and only persist when the sessionid actually
+    # changes, instead of rewriting browser_cookies.json on every poll tick.
+    live_cookies = {
+        cookie["name"]: unquote(str(cookie["value"]))
+        for cookie in context.cookies()
+        if "instagram.com" in cookie.get("domain", "")
+    }
+    sessionid = live_cookies.get("sessionid", "")
+    valid = bool(sessionid and len(sessionid) > 20)
+    if valid and sessionid != _last_written_sessionid:
+        save_cookies_from_context(context)
+        _last_written_sessionid = sessionid
+    return valid
 
 
 def ensure_browser_session() -> str:
@@ -328,6 +361,16 @@ def ensure_instagram_ready(page) -> None:
             save_cookies_from_context(page.context)
         except Exception:
             pass
+    else:
+        # has_saved_session()/has_session_cookie() only check that a sessionid
+        # cookie is present and long enough — they can't tell an expired session
+        # from a live one. This is the actual liveness check: if Instagram still
+        # isn't showing us logged in after every recovery attempt above, the
+        # session is dead. Fail loudly instead of silently browsing logged out.
+        raise SystemExit(
+            "Instagram session appears to be expired or invalid.\n"
+            "Run: python authenticate.py"
+        )
 
 
 def dismiss_notifications_popup(page) -> bool:
@@ -460,26 +503,32 @@ def browser_login(method: str = "manual") -> None:
     print(f"\nLogin method: {labels.get(method, method)}")
     print("Chrome will open on the Instagram login page.\n")
 
-    with sync_playwright() as playwright:
-        browser, context, page = get_browser_context(playwright)
+    try:
+        with sync_playwright() as playwright:
+            browser, context, page = get_browser_context(playwright)
 
-        if has_session_cookie(context):
-            print("You are already logged in from a previous session.")
-            ensure_instagram_ready(page)
-        else:
-            open_login_page(page, method=method)
-            wait_for_login(context, page)
+            if has_session_cookie(context):
+                print("You are already logged in from a previous session.")
+                ensure_instagram_ready(page)
+            else:
+                open_login_page(page, method=method)
+                wait_for_login(context, page)
 
-        if not has_session_cookie(context):
+            if not has_session_cookie(context):
+                browser.close()
+                raise SystemExit(
+                    "Login not complete. No Instagram session cookie found.\n"
+                    "Use Facebook or email login in Chrome, then run authenticate.py again."
+                )
+
+            context.storage_state(path=BROWSER_STATE_FILE)
+            cookies = save_cookies_from_context(context)
             browser.close()
-            raise SystemExit(
-                "Login not complete. No Instagram session cookie found.\n"
-                "Use Facebook or email login in Chrome, then run authenticate.py again."
-            )
-
-        context.storage_state(path=BROWSER_STATE_FILE)
-        cookies = save_cookies_from_context(context)
-        browser.close()
+    finally:
+        # Always tear down the Chrome we spawned for this login, even on error —
+        # otherwise it lingers logged in while a later run launches a second,
+        # independent Chrome for the same account.
+        close_launched_chrome()
 
     print(f"\nLogin saved for @{cookies.get('ds_user_id', 'your account')}")
     print(f"Session file: {BROWSER_STATE_FILE}")
