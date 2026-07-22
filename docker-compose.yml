@@ -3,7 +3,7 @@ services:
     build: .
     init: true            # reap zombie Chrome/crashpad processes (PID 1 must reap them)
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"   # only reachable via the Caddy reverse proxy (TLS), not directly
     volumes:
       - ./data:/app/data      # per-user Instagram sessions (data/users/<id>/)
       - ./.env:/app/.env:ro   # credentials, Clerk keys, Convex + Gemini config

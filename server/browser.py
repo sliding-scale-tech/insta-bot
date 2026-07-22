@@ -4,7 +4,7 @@ from pathlib import Path
 
 from playwright.async_api import Browser, Page, Playwright, async_playwright
 
-from instagram_bot.config.settings import DATA_DIR
+from instagram_bot.config.settings import DATA_DIR, get_proxy_config
 
 
 def _state_path_for(user_id: str) -> Path:
@@ -63,8 +63,17 @@ class BrowserManager:
             # this needs a display — Xvfb provides it in Docker (DISPLAY=:99);
             # on Windows it opens a normal window. Screenshots stream to the
             # dashboard mirror either way.
+            #
+            # Must route through the same proxy as the bot subprocess
+            # (instagram_bot/auth/browser.py's get_bot_context) — otherwise a
+            # login here comes from the VPS's raw datacenter IP while every
+            # subsequent bot session comes from the proxy IP, which reads to
+            # Instagram as a session hijack/mismatch and gets login blocked
+            # or challenged.
+            proxy = get_proxy_config()
             self._browser = await self._playwright.chromium.launch(
                 headless=False,
+                proxy=proxy,
                 args=[
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
