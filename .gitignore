@@ -36,7 +36,9 @@ pnpm-debug.log*
 # ── Convex ──────────────────────────────────────────────────────────────────
 .convex/
 convex/_generated/
-dashboard/convex/_generated/
+# dashboard/convex/_generated/ is intentionally tracked (not ignored) — it's a
+# small runtime-compatible stub (see dashboard/convex/_generated/api.ts) that
+# Vercel's build needs since it can't run `npx convex dev` during CI.
 
 # ── Docker ──────────────────────────────────────────────────────────────────
 .dockerignore
