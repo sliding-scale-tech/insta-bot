@@ -1,32 +1,65 @@
-# Secret keys — never commit
+# ── Secrets ────────────────────────────────────────────────────────────────
 .env
+.env.local
+.env.*.local
 
-# Chrome browser session (contains Instagram login cookies)
+# ── Instagram session (contains login cookies — never commit) ───────────────
 chrome_profile/
-
-# Bot runtime data (DM history, token usage, PID file)
 data/
 
-# Debug screenshots and session reports
+# ── Debug output (screenshots, HTML reports) ───────────────────────────────
 debug_output/
 
-# Python cache
+# ── Python ─────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
 .pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
 
-# Logs
-*.log
-
-# Virtual environments
+# ── Virtual environments ────────────────────────────────────────────────────
 venv/
 .venv/
 env/
+.env/
 
-# VS Code
-.vscode/
+# ── Node / pnpm ─────────────────────────────────────────────────────────────
+node_modules/
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.pnpm-store/
+pnpm-debug.log*
 
-# Windows
+# ── Convex ──────────────────────────────────────────────────────────────────
+.convex/
+convex/_generated/
+dashboard/convex/_generated/
+
+# ── Docker ──────────────────────────────────────────────────────────────────
+.dockerignore
+
+# ── Logs ───────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── OS ─────────────────────────────────────────────────────────────────────
+.DS_Store
 Thumbs.db
 desktop.ini
+
+# ── IDE ────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Claude worktrees (internal tooling) ────────────────────────────────────
+.claude/worktrees/
+
+
+.node_modules/
+
+

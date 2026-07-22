@@ -1,22 +1,23 @@
 """Debug Instagram flow — saves screenshots + HTML at each step."""
 
 import os
+import sys
 import time
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
-from browser_auth import ensure_instagram_ready, get_bot_context
-from browser_bot import (
-    HASHTAG_TO_SEARCH,
-    open_first_post,
-    search_hashtag,
-    wait_human,
-)
-from session_files import sync_cookie_files
+from instagram_bot.auth.browser import ensure_instagram_ready, get_bot_context
+from instagram_bot.auth.sessions import sync_cookie_files
+from instagram_bot.bots.browser import open_first_post, wait_human
+from instagram_bot.config.settings import ENV_PATH, HASHTAG_TO_SEARCH
 
-load_dotenv(override=True)
+load_dotenv(ENV_PATH, override=True)
 
 DEBUG_DIR = Path(__file__).parent / "debug_output"
 

@@ -19,6 +19,18 @@ DEBUG_DIR.mkdir(exist_ok=True)
 CHROME_PROFILE_DIR.mkdir(exist_ok=True)
 
 
+def _env_int(key: str, default: int) -> int:
+    """int(os.getenv(key, default)) crashes if the var is present but blank —
+    os.getenv only falls back to `default` when the key is absent entirely."""
+    raw = (os.getenv(key) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def _resolve_path(env_key: str, default_name: str) -> str:
     value = os.getenv(env_key, "").strip()
     if value:
@@ -42,7 +54,7 @@ SESSION_FILE = _resolve_path("SESSION_FILE", "session.json")
 BROWSER_STATE_FILE = _resolve_path("BROWSER_STATE_FILE", "browser_state.json")
 BROWSER_COOKIES_FILE = _resolve_path("BROWSER_COOKIES_FILE", "browser_cookies.json")
 
-CHROME_DEBUG_PORT = int(os.getenv("CHROME_DEBUG_PORT", "9222"))
+CHROME_DEBUG_PORT = _env_int("CHROME_DEBUG_PORT", 9222)
 CHROME_DEBUG_URL = os.getenv("CHROME_DEBUG_URL", f"http://127.0.0.1:{CHROME_DEBUG_PORT}")
 
 INSTAGRAM_USERNAME = (
@@ -72,18 +84,34 @@ DM_MESSAGE = os.getenv(
     "DM_MESSAGE",
     "Hey there! I saw your post under the hashtag and wanted to connect.",
 )
-MAX_COMMENTS = int(os.getenv("MAX_COMMENTS", "1"))
-MAX_DMS = int(os.getenv("MAX_DMS", "0"))
+MAX_COMMENTS = _env_int("MAX_COMMENTS", 1)
+MAX_DMS = _env_int("MAX_DMS", 0)
 LOGIN_METHOD = os.getenv("LOGIN_METHOD", "facebook")
+
+
+def get_proxy_config() -> dict | None:
+    """Parse PROXY=host:port:username:password from .env into Playwright's proxy dict."""
+    raw = (dotenv_values(ENV_PATH).get("PROXY") or os.getenv("PROXY", "")).strip()
+    if not raw:
+        return None
+    parts = raw.split(":")
+    if len(parts) != 4:
+        return None
+    host, port, proxy_username, proxy_password = parts
+    return {
+        "server": f"http://{host}:{port}",
+        "username": proxy_username,
+        "password": proxy_password,
+    }
 
 # Gemini agent
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-SESSION_MINUTES = int(os.getenv("SESSION_MINUTES", "20"))
-MAX_COMMENTS_PER_SESSION = int(os.getenv("MAX_COMMENTS_PER_SESSION", "2"))
-MAX_REPLIES_PER_SESSION = int(os.getenv("MAX_REPLIES_PER_SESSION", "3"))
-MAX_LIKES_PER_SESSION = int(os.getenv("MAX_LIKES_PER_SESSION", "12"))
-MAX_FOLLOWS_PER_SESSION = int(os.getenv("MAX_FOLLOWS_PER_SESSION", "5"))
-MAX_DMS_PER_SESSION = int(os.getenv("MAX_DMS_PER_SESSION", "2"))
+SESSION_MINUTES = _env_int("SESSION_MINUTES", 20)
+MAX_COMMENTS_PER_SESSION = _env_int("MAX_COMMENTS_PER_SESSION", 2)
+MAX_REPLIES_PER_SESSION = _env_int("MAX_REPLIES_PER_SESSION", 3)
+MAX_LIKES_PER_SESSION = _env_int("MAX_LIKES_PER_SESSION", 12)
+MAX_FOLLOWS_PER_SESSION = _env_int("MAX_FOLLOWS_PER_SESSION", 5)
+MAX_DMS_PER_SESSION = _env_int("MAX_DMS_PER_SESSION", 2)
 AGENT_PERSONA = os.getenv(
     "AGENT_PERSONA",
     "You are a knowledgeable real estate enthusiast who gives genuinely helpful, specific advice.",

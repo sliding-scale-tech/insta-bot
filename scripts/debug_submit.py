@@ -1,15 +1,22 @@
 """Test full comment submit after login."""
 
 import random
+import sys
 import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
-from browser_auth import ensure_instagram_ready, get_bot_context
-from browser_bot import COMMENT_TEXT, HASHTAG_TO_SEARCH, wait_human
+from instagram_bot.auth.browser import ensure_instagram_ready, get_bot_context
+from instagram_bot.bots.browser import wait_human
+from instagram_bot.config.settings import COMMENT_TEXT, ENV_PATH, HASHTAG_TO_SEARCH
 
-load_dotenv(override=True)
+load_dotenv(ENV_PATH, override=True)
 
 
 def main():

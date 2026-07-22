@@ -6,24 +6,38 @@ from pathlib import Path
 
 from instagram_bot.config.settings import DATA_DIR, GEMINI_MODEL
 
-# Gemini 2.5 Flash pricing (per 1M tokens, USD)
-# Source: Google AI pricing as of 2025
+# Gemini API pricing (per 1M tokens, USD), paid tier, standard (non-batch).
+# Source: https://ai.google.dev/gemini-api/docs/pricing — verified 2026-07-20.
+# NOTE: Google bills "thinking" tokens at the same rate as output tokens (the
+# API's own docs describe output pricing as "including thinking tokens") —
+# there is no separate, higher-priced thinking tier. thinking_per_m mirrors
+# output_per_m below for that reason.
+# gemini-2.5-pro has a higher tier for prompts > 200K tokens (input $2.50,
+# output $15.00) — not modeled here since this agent's prompts stay well under
+# that limit; the <=200K rates below are what actually applies.
 _PRICING: dict[str, dict] = {
-    "gemini-2.5-flash": {
-        # prompts <= 200K context window
-        "input_per_m": 0.075,
-        "output_per_m": 0.30,
-        "thinking_per_m": 3.50,
-    },
-    "gemini-2.5-pro": {
-        "input_per_m": 1.25,
-        "output_per_m": 10.00,
-        "thinking_per_m": 3.50,
-    },
-    "gemini-2.0-flash": {
+    "gemini-2.5-flash-lite": {
         "input_per_m": 0.10,
         "output_per_m": 0.40,
-        "thinking_per_m": 0.0,
+        "thinking_per_m": 0.40,
+    },
+    "gemini-2.5-flash": {
+        "input_per_m": 0.30,   # text/image/video input (audio input is $1.00, not used here)
+        "output_per_m": 2.50,
+        "thinking_per_m": 2.50,
+    },
+    "gemini-2.5-pro": {
+        # <= 200K token prompts
+        "input_per_m": 1.25,
+        "output_per_m": 10.00,
+        "thinking_per_m": 10.00,
+    },
+    "gemini-2.0-flash": {
+        # Deprecated by Google (shut down June 2026) — kept only so historical
+        # usage logs from before the migration still price correctly.
+        "input_per_m": 0.10,
+        "output_per_m": 0.40,
+        "thinking_per_m": 0.40,
     },
 }
 
@@ -34,7 +48,7 @@ def _get_price(model: str) -> dict:
     for key, price in _PRICING.items():
         if key in model.lower():
             return price
-    return {"input_per_m": 0.075, "output_per_m": 0.30, "thinking_per_m": 3.50}
+    return {"input_per_m": 0.075, "output_per_m": 0.30, "thinking_per_m": 0.30}
 
 
 class TokenTracker:

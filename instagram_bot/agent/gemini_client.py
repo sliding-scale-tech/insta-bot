@@ -49,6 +49,69 @@ class GeminiAgent:
         self._history: list[Any] = []
         self.tokens = TokenTracker(model=GEMINI_MODEL)
 
+    def complete_text(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        label: str = "complete_text",
+    ) -> str:
+        """Single-shot text completion (used by the day planner)."""
+        types = self._types
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
+            config=types.GenerateContentConfig(
+                temperature=temperature,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        if response.usage_metadata:
+            u = response.usage_metadata
+            self.tokens.record(
+                label,
+                input_tokens=getattr(u, "prompt_token_count", 0) or 0,
+                output_tokens=getattr(u, "candidates_token_count", 0) or 0,
+                thinking_tokens=getattr(u, "thoughts_token_count", 0) or 0,
+            )
+        return (response.text or "").strip()
+
+    def generate_post_caption(self, image_bytes: bytes, mime_type: str, hint: str = "") -> str:
+        """Vision-based Instagram caption writer for the Posts tab's "Write with AI"."""
+        from instagram_bot.agent.prompt_store import render
+
+        types = self._types
+        prompt = render(
+            "generate_caption",
+            persona=AGENT_PERSONA,
+            hint_line=f"- Context from the user: {hint}" if hint else "",
+        )
+
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part(text=prompt),
+                        types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                    ],
+                )
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0.85,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        if response.usage_metadata:
+            u = response.usage_metadata
+            self.tokens.record(
+                "generate_caption",
+                input_tokens=getattr(u, "prompt_token_count", 0) or 0,
+                output_tokens=getattr(u, "candidates_token_count", 0) or 0,
+                thinking_tokens=getattr(u, "thoughts_token_count", 0) or 0,
+            )
+        return (response.text or "").strip()
+
     def evaluate_post_for_comment(
         self,
         caption: str,
@@ -68,37 +131,25 @@ class GeminiAgent:
                 for c in comments[:5]
             )
 
-        prompt = f"""{AGENT_PERSONA}
+        from instagram_bot.agent.prompt_store import render
 
-You are deciding whether to comment on an Instagram post. Think carefully — you are a real person, not a bot.
-
-Mission: {mission}
-Already commented on {len(commented_urls)} posts this session.
-
-Post author: @{author or 'unknown'}
-Caption: {caption[:900] or '(no caption visible)'}
-{f"Top comments:{chr(10)}{existing}" if existing else ""}
-
-COMMENT (should_comment: true) when:
-- Clearly real estate: property listing, investment tip, market analysis, agent advice, renovation, rental, mortgage
-- Caption has enough specific detail to write a meaningful comment (location, price, strategy, renovation detail, etc.)
-- You can genuinely add value: thoughtful question, useful insight, relevant tip, sincere encouragement
-- Post looks authentic (real person / real estate professional)
-
-SKIP (should_comment: false) when:
-- Not real estate (lifestyle quote, food, fashion, general motivation)
-- Caption too vague: only "link in bio", "dm me", or less than 20 meaningful words
-- Looks like spam, giveaway ("tag 3 friends to win"), or mass-produced promo
-- Caption is just hashtags
-- Already commented on this post (in commented_urls list)
-
-Respond ONLY with this JSON — no markdown, no extra text:
-{{"should_comment": true, "confidence": 0.85, "reason": "why you chose this", "skip_reason": null}}"""
+        prompt = render(
+            "evaluate_post",
+            persona=AGENT_PERSONA,
+            mission=mission,
+            commented_count=len(commented_urls),
+            author=author or "unknown",
+            caption=caption[:900] or "(no caption visible)",
+            existing_comments=f"Top comments:{chr(10)}{existing}" if existing else "",
+        )
 
         response = self._client.models.generate_content(
             model=self._model,
             contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.3),
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
 
         if response.usage_metadata:
@@ -136,6 +187,7 @@ Respond ONLY with this JSON — no markdown, no extra text:
         caption: str,
         author: str = "",
         comments: list | None = None,
+        goal: str = "",
     ) -> str:
         """Write a genuine, specific comment based on post content."""
         types = self._types
@@ -146,25 +198,24 @@ Respond ONLY with this JSON — no markdown, no extra text:
                 for c in comments[:5]
             )
 
-        prompt = f"""{AGENT_PERSONA}
+        from instagram_bot.agent.prompt_store import render
 
-Write ONE Instagram comment for this real estate post. Rules:
-- 1-3 sentences max, natural and human
-- Reference something SPECIFIC from the caption (location, strategy, tip, property type, renovation)
-- Be genuinely helpful: ask a thoughtful question, share a useful insight, or encourage
-- NO generic spam like "Great post!" or "Nice!" alone
-- NO hashtags. Sound like a knowledgeable real person, not a bot.
-
-Author: @{author or "unknown"}
-Caption: {caption or "(no caption visible)"}
-{f"Existing comments:{chr(10)}{existing}" if existing else ""}
-
-Reply with ONLY the comment text, nothing else."""
+        prompt = render(
+            "generate_comment",
+            persona=AGENT_PERSONA,
+            goal=goal or "(no specific focus)",
+            author=author or "unknown",
+            caption=caption or "(no caption visible)",
+            existing_comments=f"Existing comments:{chr(10)}{existing}" if existing else "",
+        )
 
         response = self._client.models.generate_content(
             model=self._model,
             contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.85),
+            config=types.GenerateContentConfig(
+                temperature=0.85,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
         if response.usage_metadata:
             u = response.usage_metadata
@@ -210,7 +261,10 @@ Reply with ONLY the reply text, nothing else."""
         response = self._client.models.generate_content(
             model=self._model,
             contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.85),
+            config=types.GenerateContentConfig(
+                temperature=0.85,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
         if response.usage_metadata:
             u = response.usage_metadata
@@ -247,7 +301,10 @@ Reply with ONLY the message text, nothing else."""
         response = self._client.models.generate_content(
             model=self._model,
             contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.9),
+            config=types.GenerateContentConfig(
+                temperature=0.9,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
         if response.usage_metadata:
             u = response.usage_metadata
@@ -285,7 +342,10 @@ Reply with ONLY the reply text, nothing else."""
         response = self._client.models.generate_content(
             model=self._model,
             contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-            config=types.GenerateContentConfig(temperature=0.85),
+            config=types.GenerateContentConfig(
+                temperature=0.85,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
         )
         if response.usage_metadata:
             u = response.usage_metadata
@@ -304,11 +364,23 @@ Reply with ONLY the reply text, nothing else."""
             types.Content(role="user", parts=[types.Part(text=user_message)])
         )
 
-        # Keep history bounded: first message (system+kickoff) + last 8 exchanges (16 msgs)
-        # This prevents unbounded context growth that causes 429s and high costs
+        # Keep history bounded: first message (system+kickoff) + up to ~8 recent exchanges.
+        # This prevents unbounded context growth that causes 429s and high costs.
+        # The cut point must land on a plain user text turn (never mid function_call/
+        # function_response pair), otherwise Gemini rejects the next request with a 400.
         _MAX_HISTORY = 17  # 1 kickoff + 8 exchanges × 2 messages each
         if len(self._history) > _MAX_HISTORY:
-            self._history = [self._history[0]] + self._history[-(_MAX_HISTORY - 1):]
+            cutoff = len(self._history) - (_MAX_HISTORY - 1)
+            while cutoff < len(self._history):
+                content = self._history[cutoff]
+                parts = content.parts or []
+                is_safe_cut = content.role == "user" and all(
+                    getattr(p, "function_response", None) is None for p in parts
+                )
+                if is_safe_cut:
+                    break
+                cutoff += 1
+            self._history = [self._history[0]] + self._history[cutoff:]
 
         response = None
         for _attempt in range(5):
@@ -319,6 +391,7 @@ Reply with ONLY the reply text, nothing else."""
                     config=types.GenerateContentConfig(
                         tools=self._tools,
                         temperature=0.7,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
                     ),
                 )
                 break

@@ -1,9 +1,19 @@
 """Navigation tools — scroll, open posts, hashtags, profiles, inbox via UI clicks."""
 
 import random
+from urllib.parse import urlparse
 
 from instagram_bot.auth.browser import ensure_instagram_ready
-from instagram_bot.perception.page_parser import parse_feed_posts, parse_inbox, parse_page_state, parse_profile_page
+from instagram_bot.perception.page_parser import (
+    parse_explore_grid,
+    parse_feed_posts,
+    parse_followers_list,
+    parse_inbox,
+    parse_notifications,
+    parse_page_state,
+    parse_profile_page,
+    parse_search_results,
+)
 from instagram_bot.tools.context import ToolContext
 from instagram_bot.tools.human import wait_human
 
@@ -168,7 +178,7 @@ def open_hashtag(ctx: ToolContext, hashtag: str) -> dict:
             wait_human(0.8, 1.4)
 
     posts = parse_feed_posts(page)
-    return {"hashtag": tag, "posts_found": len(posts), "posts": posts[:8], **parse_page_state(page)}
+    return {"success": True, "hashtag": tag, "posts_found": len(posts), "posts": posts[:8], **parse_page_state(page)}
 
 
 def open_post(ctx: ToolContext, url: str | None = None, index: int | None = None) -> dict:
@@ -181,11 +191,16 @@ def open_post(ctx: ToolContext, url: str | None = None, index: int | None = None
         posts = parse_feed_posts(page)
         if posts and index < len(posts):
             post_url = posts[index]["url"]
-            # Try clicking the image/grid item first
+            # Click by href, not by positional nth(index) — parse_feed_posts dedupes
+            # hrefs and skips /c/ and /r/ links, but a plain 'a[href*="/p/"]' locator
+            # does not, so grid_items.nth(index) can point at a different post than
+            # posts[index] (e.g. when a post has both an image anchor and a caption
+            # anchor). Clicking the exact href guarantees we open the right one.
             try:
-                grid_items = page.locator('article a[href*="/p/"], div a[href*="/p/"]')
-                if grid_items.count() > index:
-                    grid_items.nth(index).click(force=True)
+                href_path = urlparse(post_url).path
+                target = page.locator(f'a[href="{href_path}"]').first
+                if target.count():
+                    target.click(force=True)
                     wait_human(2, 4)
                     return {"opened_url": page.url, "success": True, **parse_page_state(page)}
             except Exception:
@@ -318,6 +333,263 @@ def open_inbox(ctx: ToolContext) -> dict:
         print(f"  [inbox DOM sample]\n{dom_debug[:800]}")
     threads = parse_inbox(page, limit=10)
     return {"threads": threads, "count": len(threads), **parse_page_state(page)}
+
+
+def search_account(ctx: ToolContext, query: str) -> dict:
+    """Search Instagram for a person/username via the search UI."""
+    page = ctx.page
+
+    # Make sure we're on a page with the sidebar (home/hashtag/profile)
+    # Reels full-screen and direct/DM pages hide the sidebar nav
+    if "/reel/" in page.url or "/reels/" in page.url or "/direct/" in page.url:
+        page.goto("https://www.instagram.com/", wait_until="domcontentloaded")
+        wait_human(1.5, 2.5)
+
+    # Click the Search icon in the sidebar
+    search_icon_selectors = [
+        'svg[aria-label="Search"]',
+        'a[aria-label="Search"]',
+        'span[aria-label="Search"]',
+    ]
+    icon_clicked = False
+    for sel in search_icon_selectors:
+        try:
+            el = page.locator(sel).first
+            if el.is_visible(timeout=2000):
+                try:
+                    ancestor = page.locator(sel).locator("xpath=ancestor::a[1] | ancestor::button[1]").first
+                    ancestor.click(force=True, timeout=3000)
+                except Exception:
+                    el.click(force=True, timeout=3000)
+                icon_clicked = True
+                wait_human(0.8, 1.3)
+                break
+        except Exception:
+            continue
+
+    if not icon_clicked:
+        return {"success": False, "reason": "Search icon not found", "results": []}
+
+    # Wait for search input
+    try:
+        inp = page.locator('input[aria-label="Search input"]')
+        inp.wait_for(state="visible", timeout=6000)
+        wait_human(0.4, 0.7)
+        try:
+            inp.click(force=True, timeout=3000)
+        except Exception:
+            inp.focus()
+        wait_human(0.3, 0.5)
+    except Exception as e:
+        return {"success": False, "reason": f"Search input not visible: {e}", "results": []}
+
+    # Type the query (no # prefix — this is account search)
+    try:
+        inp.fill("")
+        wait_human(0.2, 0.3)
+        inp.type(query, delay=110)
+        wait_human(2, 3)
+    except Exception as e:
+        return {"success": False, "reason": f"Typing failed: {e}", "results": []}
+
+    results = parse_search_results(page, limit=10)
+    return {"success": True, "query": query, "results": results, "count": len(results)}
+
+
+def get_followers(ctx: ToolContext, username: str, limit: int = 20) -> dict:
+    """Open the followers modal for a user and return their follower list."""
+    page = ctx.page
+    username = username.lstrip("@").strip()
+
+    # Navigate to profile first if needed
+    if f"/{username}" not in page.url:
+        page.goto(f"https://www.instagram.com/{username}/", wait_until="domcontentloaded")
+        wait_human(2, 3)
+
+    # Click the "followers" count link
+    for sel in [
+        f'a[href="/{username}/followers/"]',
+        'a[href*="/followers/"]',
+        'span:has-text("followers")',
+    ]:
+        try:
+            el = page.locator(sel).first
+            if el.is_visible(timeout=3000):
+                el.click(force=True)
+                wait_human(1.5, 2.5)
+                break
+        except Exception:
+            continue
+    else:
+        # Direct navigation fallback
+        page.goto(f"https://www.instagram.com/{username}/followers/", wait_until="domcontentloaded")
+        wait_human(2, 3)
+
+    # Wait for modal content
+    try:
+        page.locator('div[role="dialog"]').first.wait_for(state="visible", timeout=5000)
+    except Exception:
+        pass
+
+    # Scroll the modal to load more users
+    try:
+        modal = page.locator('div[role="dialog"]').first
+        for _ in range(3):
+            modal.evaluate("(el) => { el.scrollTop = el.scrollHeight; }")
+            wait_human(0.8, 1.2)
+    except Exception:
+        pass
+
+    users = parse_followers_list(page, limit=limit)
+    return {"username": username, "type": "followers", "users": users, "count": len(users), **parse_page_state(page)}
+
+
+def get_following(ctx: ToolContext, username: str, limit: int = 20) -> dict:
+    """Open the following modal for a user and return who they follow."""
+    page = ctx.page
+    username = username.lstrip("@").strip()
+
+    if f"/{username}" not in page.url:
+        page.goto(f"https://www.instagram.com/{username}/", wait_until="domcontentloaded")
+        wait_human(2, 3)
+
+    for sel in [
+        f'a[href="/{username}/following/"]',
+        'a[href*="/following/"]',
+        'span:has-text("following")',
+    ]:
+        try:
+            el = page.locator(sel).first
+            if el.is_visible(timeout=3000):
+                el.click(force=True)
+                wait_human(1.5, 2.5)
+                break
+        except Exception:
+            continue
+    else:
+        page.goto(f"https://www.instagram.com/{username}/following/", wait_until="domcontentloaded")
+        wait_human(2, 3)
+
+    try:
+        page.locator('div[role="dialog"]').first.wait_for(state="visible", timeout=5000)
+    except Exception:
+        pass
+
+    try:
+        modal = page.locator('div[role="dialog"]').first
+        for _ in range(3):
+            modal.evaluate("(el) => { el.scrollTop = el.scrollHeight; }")
+            wait_human(0.8, 1.2)
+    except Exception:
+        pass
+
+    users = parse_followers_list(page, limit=limit)
+    return {"username": username, "type": "following", "users": users, "count": len(users), **parse_page_state(page)}
+
+
+def browse_explore(ctx: ToolContext) -> dict:
+    """Navigate to the Instagram Explore page and return the post grid."""
+    page = ctx.page
+
+    # Always navigate directly — sidebar Explore icon is unreliable when sidebars are hidden
+    page.goto("https://www.instagram.com/explore/", wait_until="domcontentloaded")
+    ensure_instagram_ready(page)
+    wait_human(1.5, 2.5)
+
+    # Wait for at least one post link to appear (Explore grid is lazily rendered)
+    try:
+        page.locator('a[href*="/p/"], a[href*="/reel/"]').first.wait_for(state="visible", timeout=8000)
+    except Exception:
+        pass
+
+    # Scroll to trigger lazy loading if grid is empty
+    for _ in range(2):
+        page.mouse.wheel(0, 500)
+        wait_human(0.8, 1.2)
+
+    posts = parse_explore_grid(page, limit=20)
+    return {"success": True, "posts": posts, "count": len(posts), **parse_page_state(page)}
+
+
+def browse_reels_feed(ctx: ToolContext) -> dict:
+    """Navigate to the Instagram Reels feed and return visible reels.
+
+    Instagram's /reels/ page is a full-screen video player (not a grid). We parse
+    the current reel being shown plus any reel links visible in the sidebar/overlay.
+    """
+    page = ctx.page
+
+    page.goto("https://www.instagram.com/reels/", wait_until="domcontentloaded")
+    ensure_instagram_ready(page)
+    wait_human(2, 3)
+
+    # The reels page immediately plays a reel — collect reel URLs from the current URL
+    # and any /reel/ links rendered on the page (sidebar suggestions)
+    reels = []
+    seen: set = set()
+
+    # Current reel from URL — Instagram uses /reels/<id>/ (plural) for the feed player
+    current_url = page.url
+    if "/reel/" in current_url or "/reels/" in current_url:
+        reels.append({"index": 0, "url": current_url, "media_type": "reel", "caption_snippet": "", "author_hint": ""})
+        seen.add(current_url)
+
+    # Additional reel links on the page (suggestions / carousel)
+    try:
+        reel_links = page.evaluate("""() => {
+            const seen = new Set();
+            const out = [];
+            document.querySelectorAll('a[href*="/reel/"]').forEach(a => {
+                const href = a.getAttribute('href') || '';
+                const url = href.startsWith('http') ? href : 'https://www.instagram.com' + href;
+                if (!seen.has(url) && !href.includes('/c/') && !href.includes('/r/')) {
+                    seen.add(url);
+                    const img = a.querySelector('img');
+                    const alt = img ? (img.getAttribute('alt') || '') : '';
+                    out.push({ url, media_type: 'reel', caption_snippet: alt.slice(0, 140), author_hint: '' });
+                }
+            });
+            return out;
+        }""")
+        for item in (reel_links or []):
+            if item["url"] not in seen:
+                item["index"] = len(reels)
+                reels.append(item)
+                seen.add(item["url"])
+    except Exception:
+        pass
+
+    return {"success": True, "reels": reels, "count": len(reels), **parse_page_state(page)}
+
+
+def read_notifications(ctx: ToolContext) -> dict:
+    """Open the notifications/activity tab and return recent activity."""
+    page = ctx.page
+
+    # Click the heart/notifications icon in the sidebar
+    clicked = _click_sidebar_icon(page, ["Notifications", "Activity", "Heart"])
+    if not clicked:
+        # Try alternate approach: look for notification bell
+        for sel in [
+            'svg[aria-label="Notifications"]',
+            'a[href*="/accounts/activity/"]',
+        ]:
+            try:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=2000):
+                    el.click(force=True)
+                    clicked = True
+                    wait_human(1, 2)
+                    break
+            except Exception:
+                continue
+
+    if not clicked:
+        page.goto("https://www.instagram.com/accounts/activity/", wait_until="domcontentloaded")
+
+    wait_human(1.5, 2.5)
+    notifications = parse_notifications(page, limit=20)
+    return {"success": True, "notifications": notifications, "count": len(notifications), **parse_page_state(page)}
 
 
 def open_thread(ctx: ToolContext, username: str) -> dict:

@@ -1,0 +1,13 @@
+services:
+  backend:
+    build: .
+    init: true            # reap zombie Chrome/crashpad processes (PID 1 must reap them)
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data      # per-user Instagram sessions (data/users/<id>/)
+      - ./.env:/app/.env:ro   # credentials, Clerk keys, Convex + Gemini config
+      - ./media:/app/media    # images for the post_photo tool
+    environment:
+      - ENV=production        # auto-starts the mirror browser on WS connect
+    restart: unless-stopped

@@ -39,14 +39,20 @@ TOOLS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "observe_replies": {
+        "fn": lambda ctx, a: perception.observe_replies(ctx, comment_index=a.get("comment_index", 0), limit=a.get("limit", 10)),
+        "description": "Expand and read replies (sub-comments) on a specific comment by index. Call before like_reply or ai_reply_to_comment so you can see reply content.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "comment_index": {"type": "integer", "description": "Parent comment index (from observe_comments)"},
+                "limit": {"type": "integer", "description": "Max replies to return"},
+            },
+        },
+    },
     "evaluate_current_post": {
         "fn": lambda ctx, _: perception.evaluate_current_post(ctx),
-        "description": (
-            "AI evaluation: should I comment on this post? "
-            "Checks memory (no duplicate), then calls Gemini to decide. "
-            "Returns {should_comment, confidence, reason, skip_reason}. "
-            "ALWAYS call this after observe_current_post before engaging."
-        ),
+        "description": "AI check: should I comment on this post? Call after observe_current_post, before engaging. Returns should_comment/confidence/reason.",
         "parameters": {"type": "object", "properties": {}},
     },
 
@@ -109,6 +115,56 @@ TOOLS: dict[str, dict[str, Any]] = {
         "description": "Open the DM inbox and list recent conversations",
         "parameters": {"type": "object", "properties": {}},
     },
+    "search_account": {
+        "fn": lambda ctx, a: navigation.search_account(ctx, query=a["query"]),
+        "description": "Search Instagram for a person or username. Returns matching accounts with username and profile URL.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Name or username to search for"},
+            },
+            "required": ["query"],
+        },
+    },
+    "get_followers": {
+        "fn": lambda ctx, a: navigation.get_followers(ctx, username=a["username"], limit=a.get("limit", 20)),
+        "description": "Open a user's followers list and return their follower accounts",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "Instagram username (without @)"},
+                "limit": {"type": "integer", "description": "Max followers to return"},
+            },
+            "required": ["username"],
+        },
+    },
+    "get_following": {
+        "fn": lambda ctx, a: navigation.get_following(ctx, username=a["username"], limit=a.get("limit", 20)),
+        "description": "Open a user's following list and return accounts they follow",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "Instagram username (without @)"},
+                "limit": {"type": "integer", "description": "Max following to return"},
+            },
+            "required": ["username"],
+        },
+    },
+    "browse_explore": {
+        "fn": lambda ctx, _: navigation.browse_explore(ctx),
+        "description": "Navigate to the Instagram Explore page and return the post/reel grid",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    "browse_reels_feed": {
+        "fn": lambda ctx, _: navigation.browse_reels_feed(ctx),
+        "description": "Navigate to the Instagram Reels feed and return visible reels",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    "read_notifications": {
+        "fn": lambda ctx, _: navigation.read_notifications(ctx),
+        "description": "Open the activity/notifications tab and return recent likes, follows, and comment activity",
+        "parameters": {"type": "object", "properties": {}},
+    },
     "open_thread": {
         "fn": lambda ctx, a: navigation.open_thread(ctx, username=a["username"]),
         "description": "Open or create a DM thread with a specific user",
@@ -140,18 +196,12 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "ai_comment_on_post": {
         "fn": lambda ctx, _: actions.ai_comment_on_post(ctx),
-        "description": (
-            "Gemini reads the post caption and writes a specific, helpful comment then posts it. "
-            "Also likes up to 2 comments automatically. Use AFTER evaluate_current_post returns should_comment=true."
-        ),
+        "description": "Gemini writes and posts a specific comment from the post caption, likes up to 2 comments. Use after evaluate_current_post says yes.",
         "parameters": {"type": "object", "properties": {}},
     },
     "skip_post": {
         "fn": lambda ctx, a: actions.skip_post(ctx, reason=a.get("reason", "")),
-        "description": (
-            "Record this post as skipped (won't re-open it this session) and go back to feed. "
-            "Use when evaluate_current_post returns should_comment=false."
-        ),
+        "description": "Record this post as skipped and go back. Use when evaluate_current_post says no.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -163,6 +213,49 @@ TOOLS: dict[str, dict[str, Any]] = {
         "fn": lambda ctx, _: actions.like_post(ctx),
         "description": "Like the currently open post",
         "parameters": {"type": "object", "properties": {}},
+    },
+    "save_post": {
+        "fn": lambda ctx, _: actions.save_post(ctx),
+        "description": "Bookmark/save the currently open post",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    "list_media_files": {
+        "fn": lambda ctx, _: actions.list_media_files(ctx),
+        "description": "List photos/videos uploaded from the dashboard's Posts tab that haven't been posted yet. Call this BEFORE post_photo.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    "post_photo": {
+        "fn": lambda ctx, a: actions.post_photo(ctx, image_path=a.get("image_path", ""), caption=a.get("caption", "")),
+        "description": "Post the oldest pending dashboard upload to Instagram (call with no arguments) — it is automatically marked posted afterward so it's never reused. Only pass image_path/caption to override with a specific local file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "image_path": {"type": "string", "description": "Optional — leave empty to post the queued dashboard upload. Only set this to use a specific local file path instead."},
+                "caption": {"type": "string", "description": "Optional caption override — the queued upload's own caption is used if omitted"},
+            },
+        },
+    },
+    "share_post_via_dm": {
+        "fn": lambda ctx, a: actions.share_post_via_dm(ctx, username=a["username"]),
+        "description": "Share the currently open post to a user via DM using the share button",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "Username to share the post with"},
+            },
+            "required": ["username"],
+        },
+    },
+    "follow_hashtag": {
+        "fn": lambda ctx, a: actions.follow_hashtag(ctx, hashtag=a["hashtag"]),
+        "description": "Follow a hashtag on its explore page. Navigates there if not already on the page.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "hashtag": {"type": "string", "description": "Hashtag to follow (without #)"},
+            },
+            "required": ["hashtag"],
+        },
     },
     "like_comment": {
         "fn": lambda ctx, a: actions.like_comment(ctx, comment_index=a.get("comment_index", 0)),
@@ -193,10 +286,7 @@ TOOLS: dict[str, dict[str, Any]] = {
         "fn": lambda ctx, a: actions.ai_reply_to_comment(
             ctx, comment_index=a.get("comment_index", 0)
         ),
-        "description": (
-            "Gemini reads a specific comment and writes a natural, human-sounding reply, then posts it. "
-            "Use after observe_comments when you see an interesting question or point worth responding to."
-        ),
+        "description": "Gemini writes and posts a natural reply to one comment. Use after observe_comments for a worthwhile reply target.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -246,18 +336,12 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "send_dm": {
         "fn": lambda ctx, a: actions.send_dm(ctx, username=a["username"], text=a.get("text", "")),
-        "description": (
-            "Send a DM to a real estate professional. "
-            "The 'text' field is CONTEXT ABOUT THEM (their niche, market, what they posted) — "
-            "the actual message is auto-generated as a genuine 1-sentence question. "
-            "If result has skipped=true, that person was already DM'd — pick a DIFFERENT person. "
-            "Do NOT call evaluate_current_post before DMing — just open_profile then send_dm."
-        ),
+        "description": "DM a real estate pro. 'text' = context about them (message is auto-generated). skipped=true means already DM'd, pick someone else. No evaluate_current_post needed — just open_profile then send_dm.",
         "parameters": {
             "type": "object",
             "properties": {
                 "username": {"type": "string", "description": "Username to DM"},
-                "text": {"type": "string", "description": "Context about this person (their market, niche, what they posted) — used to personalize the auto-generated message"},
+                "text": {"type": "string", "description": "Context about this person (market/niche/post) to personalize the message"},
             },
             "required": ["username"],
         },
@@ -290,11 +374,7 @@ TOOLS: dict[str, dict[str, Any]] = {
         "fn": lambda ctx, a: actions.ai_reply_to_dm(
             ctx, thread_index=a.get("thread_index", 0)
         ),
-        "description": (
-            "Check a DM thread — if THEY replied last (not you), wait 30-60s then send a short "
-            "genuine English reply to build rapport. Skips automatically if we sent the last message. "
-            "Use after read_inbox to reply to people who responded to your outreach."
-        ),
+        "description": "If they replied last (not you), wait then send a short genuine English reply. Auto-skips if it's still our turn. Use after read_inbox.",
         "parameters": {
             "type": "object",
             "properties": {

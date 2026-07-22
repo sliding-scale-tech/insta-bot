@@ -53,7 +53,11 @@ def handle_exception(client: Client, error: Exception) -> bool:
         raise error
     if isinstance(error, ChallengeRequired):
         api_path = json_value(client.last_json, "challenge", "api_path")
-        if api_path != "/challenge/":
+        # Only resolve when Instagram actually put us at the challenge endpoint.
+        # The condition here used to be inverted (`!=`), which meant the normal
+        # case never called challenge_resolve — the challenge was left unresolved
+        # and every subsequent request kept failing with a fresh ChallengeRequired.
+        if api_path == "/challenge/":
             client.challenge_resolve(client.last_json)
         return True
     if isinstance(error, FeedbackRequired):
@@ -117,6 +121,19 @@ def try_json_session_import(client: Client) -> Client | None:
 
         client.dump_settings(SESSION_FILE)
         return client
+    except (LoginRequired, ChallengeRequired) as error:
+        # Session is genuinely dead — safe to fall through to password/challenge login.
+        logger.info("JSON session import failed (invalid session): %s", error)
+        return None
+    except (ClientThrottledError, PleaseWaitFewMinutes) as error:
+        # The session itself is fine — Instagram is just rate-limiting us. Falling
+        # through to a fresh password login here would risk tripping a checkpoint
+        # on an account that isn't actually logged out.
+        logger.warning("JSON session import throttled: %s", error)
+        raise SystemExit(
+            "\nInstagram is rate-limiting this session right now.\n"
+            "Wait a few minutes and try again instead of re-logging in.\n"
+        ) from error
     except Exception as error:
         logger.info("JSON session import failed: %s", error)
         return None
@@ -156,7 +173,7 @@ def try_password_login(username: str, password: str) -> Client | None:
         client.get_timeline_feed()
         client.dump_settings(SESSION_FILE)
         return client
-    except BadPassword:
+    except (BadPassword, ReloginAttemptExceeded):
         return None
 
 
