@@ -88,6 +88,22 @@ MAX_COMMENTS = _env_int("MAX_COMMENTS", 1)
 MAX_DMS = _env_int("MAX_DMS", 0)
 LOGIN_METHOD = os.getenv("LOGIN_METHOD", "facebook")
 
+
+def get_proxy_config() -> dict | None:
+    """Parse PROXY=host:port:username:password from .env into Playwright's proxy dict."""
+    raw = (dotenv_values(ENV_PATH).get("PROXY") or os.getenv("PROXY", "")).strip()
+    if not raw:
+        return None
+    parts = raw.split(":")
+    if len(parts) != 4:
+        return None
+    host, port, proxy_username, proxy_password = parts
+    return {
+        "server": f"http://{host}:{port}",
+        "username": proxy_username,
+        "password": proxy_password,
+    }
+
 # Gemini agent
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 SESSION_MINUTES = _env_int("SESSION_MINUTES", 20)

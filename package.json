@@ -1,0 +1,13 @@
+{
+  "name": "instagram-bot",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "convex dev",
+    "deploy": "convex deploy"
+  },
+  "dependencies": {
+    "convex": "^1.17.0",
+    "svix": "^1.98.0"
+  }
+}

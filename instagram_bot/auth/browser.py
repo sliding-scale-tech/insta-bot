@@ -20,6 +20,7 @@ from instagram_bot.config.settings import (
     CHROME_PROFILE_DIR,
     LOGIN_METHOD,
     get_credentials,
+    get_proxy_config,
 )
 
 CHROME_PROFILE_DIR_STR = str(CHROME_PROFILE_DIR)
@@ -192,25 +193,70 @@ def has_session_cookie(context=None) -> bool:
 
 def ensure_browser_session() -> str:
     sync_cookie_files()
+
+    # A Playwright storage_state written by the dashboard mirror has a "cookies"
+    # array — trust it directly. (has_saved_session() only checks the separate
+    # browser_cookies.json, which the mirror doesn't write.)
+    if os.path.exists(BROWSER_STATE_FILE):
+        try:
+            import json as _json
+            with open(BROWSER_STATE_FILE, encoding="utf-8") as f:
+                if _json.load(f).get("cookies"):
+                    return BROWSER_STATE_FILE
+        except Exception:
+            pass
+
     if has_saved_session() and os.path.exists(BROWSER_STATE_FILE):
         return BROWSER_STATE_FILE
 
-    print("No valid login found in JSON files. Opening Chrome now...")
+    # Try fetching session from Convex (survives container restarts)
+    try:
+        from instagram_bot.db.convex_client import get_browser_session
+        bot_user = os.environ.get("BOT_USER_ID", "default")
+        state_json = get_browser_session(bot_user)
+        if state_json:
+            import json as _json
+            _json.loads(state_json)  # validate before writing
+            os.makedirs(os.path.dirname(BROWSER_STATE_FILE), exist_ok=True)
+            with open(BROWSER_STATE_FILE, "w", encoding="utf-8") as f:
+                f.write(state_json)
+            print("  [session] Loaded browser session from Convex")
+            return BROWSER_STATE_FILE
+    except Exception as exc:
+        print(f"  [session] Convex session load skipped: {exc}")
+
+    print("No valid login found. Opening Chrome now...")
     browser_login(method=LOGIN_METHOD)
     return BROWSER_STATE_FILE
 
 
 def get_bot_context(playwright):
-    """Launch Chrome with saved session from browser_state.json."""
+    """Launch Chromium with saved session from browser_state.json.
+
+    Always HEADED to avoid Instagram's headless-browser detection. On Linux
+    (Docker) this relies on Xvfb providing DISPLAY=:99; on Windows it opens a
+    real window.
+    """
+    import sys
     state_file = ensure_browser_session()
+    on_linux = sys.platform != "win32"
+    proxy = get_proxy_config()
+    if proxy:
+        print(f"  [proxy] Routing through {proxy['server']}")
     browser = playwright.chromium.launch(
         headless=False,
-        channel="chrome",
-        args=["--start-maximized"],
+        proxy=proxy,
+        args=(
+            ["--no-sandbox", "--disable-dev-shm-usage", "--disable-setuid-sandbox",
+             "--disable-blink-features=AutomationControlled", "--window-size=1280,800"]
+            if on_linux
+            else ["--start-maximized", "--disable-blink-features=AutomationControlled"]
+        ),
     )
     context = browser.new_context(
         storage_state=state_file,
-        no_viewport=True,
+        viewport={"width": 1280, "height": 800} if on_linux else None,
+        no_viewport=not on_linux,
     )
     page = context.new_page()
     page.goto("https://www.instagram.com/", wait_until="domcontentloaded")

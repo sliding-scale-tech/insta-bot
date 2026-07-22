@@ -118,14 +118,19 @@ def evaluate_current_post(ctx: ToolContext) -> dict:
             }
 
     if ctx.gemini is None:
-        # Dry-run: simple keyword check
-        keywords = ["real estate", "property", "home", "listing", "investment",
-                    "mortgage", "rent", "agent", "house", "apartment", "condo"]
+        # Dry-run: keyword check derived from the session goal (falls back to the
+        # configured mission when the goal names no specific topic).
+        source = ctx.goal or AGENT_MISSION
+        keywords = [
+            w.strip("#.,!?'\"()").lower()
+            for w in source.split()
+            if len(w.strip("#.,!?'\"()")) > 3
+        ]
         is_relevant = any(k in (caption or "").lower() for k in keywords)
         return {
             "should_comment": is_relevant,
             "confidence": 0.7 if is_relevant else 0.3,
-            "reason": "keyword match" if is_relevant else "no real estate keywords found",
+            "reason": "keyword match" if is_relevant else "no goal-related keywords found",
             "skip_reason": None if is_relevant else "not relevant",
             "url": url,
             "author": author,
@@ -139,7 +144,9 @@ def evaluate_current_post(ctx: ToolContext) -> dict:
         author=author,
         comments=comments,
         commented_urls=list(all_commented),
-        mission=AGENT_MISSION,
+        # The session goal is the authoritative niche; AGENT_MISSION is only a
+        # fallback when the user gave no goal.
+        mission=ctx.goal or AGENT_MISSION,
     )
     result["url"] = url
     result["author"] = author

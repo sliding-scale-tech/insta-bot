@@ -221,19 +221,18 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "list_media_files": {
         "fn": lambda ctx, _: actions.list_media_files(ctx),
-        "description": "List all image/video files available in the media/ folder. Call this BEFORE post_photo to see which filenames are available.",
+        "description": "List photos/videos uploaded from the dashboard's Posts tab that haven't been posted yet. Call this BEFORE post_photo.",
         "parameters": {"type": "object", "properties": {}},
     },
     "post_photo": {
-        "fn": lambda ctx, a: actions.post_photo(ctx, image_path=a["image_path"], caption=a.get("caption", "")),
-        "description": "Upload a photo/video from the media/ folder and post it to Instagram. Call list_media_files first to get the correct filename.",
+        "fn": lambda ctx, a: actions.post_photo(ctx, image_path=a.get("image_path", ""), caption=a.get("caption", "")),
+        "description": "Post the oldest pending dashboard upload to Instagram (call with no arguments) — it is automatically marked posted afterward so it's never reused. Only pass image_path/caption to override with a specific local file.",
         "parameters": {
             "type": "object",
             "properties": {
-                "image_path": {"type": "string", "description": "Path to the image, e.g. 'media/house.jpg' — use a filename from list_media_files"},
-                "caption": {"type": "string", "description": "Post caption text"},
+                "image_path": {"type": "string", "description": "Optional — leave empty to post the queued dashboard upload. Only set this to use a specific local file path instead."},
+                "caption": {"type": "string", "description": "Optional caption override — the queued upload's own caption is used if omitted"},
             },
-            "required": ["image_path"],
         },
     },
     "share_post_via_dm": {

@@ -126,9 +126,43 @@ def comment_on_post(ctx: ToolContext, text: str) -> dict:
     _submit_textarea(page, textarea)
     _dismiss_repost_modal(page)
 
+    # Verify the comment actually landed. Instagram can silently drop a submit
+    # (rate limit / "Action Blocked" / button not firing) — without this check the
+    # tool would report success and permanently mark the post as commented.
+    verified = _comment_appears_on_page(page, text)
+    if not verified:
+        print("  [warn] Comment submit not verified on page — it may not have posted")
+
     post_url = page.url
     ctx.memory.setdefault("commented_posts", []).append(post_url)
-    return {"success": True, "post_url": post_url, "comment": text}
+    return {
+        "success": True,
+        "post_url": post_url,
+        "comment": text,
+        "verified": verified,
+    }
+
+
+def _comment_appears_on_page(page, text: str, timeout_ms: int = 6000) -> bool:
+    """Poll the page for a distinctive slice of the comment we just submitted."""
+    import time as _time
+
+    # A middle slice avoids emoji/truncation issues at the edges.
+    probe = (text or "").strip()[:60].strip()
+    if len(probe) < 8:
+        return False
+
+    deadline = _time.time() + (timeout_ms / 1000)
+    while _time.time() < deadline:
+        try:
+            # Textarea cleared is a strong signal the submit went through.
+            body = page.inner_text("body")
+            if probe in body:
+                return True
+        except Exception:
+            pass
+        _time.sleep(0.5)
+    return False
 
 
 def reply_to_comment(
@@ -321,7 +355,7 @@ def ai_comment_on_post(ctx: ToolContext) -> dict:
     author = post.get("author") or ""
 
     print("  Gemini analyzing post and writing comment...")
-    text = ctx.gemini.generate_helpful_comment(caption, author, comments)
+    text = ctx.gemini.generate_helpful_comment(caption, author, comments, goal=ctx.goal)
     safe = text[:80].encode("ascii", errors="replace").decode("ascii")
     print(f"  Generated: {safe}...")
 
@@ -695,34 +729,98 @@ def share_post_via_dm(ctx: ToolContext, username: str) -> dict:
     return {"success": False, "reason": "Send button not found in share sheet", "post_url": page.url}
 
 
-def post_photo(ctx: ToolContext, image_path: str, caption: str = "") -> dict:
-    """Upload a photo/video from disk and post it to Instagram with a caption.
+def post_photo(ctx: ToolContext, image_path: str = "", caption: str = "") -> dict:
+    """Upload a photo/video and post it to Instagram with a caption.
 
-    image_path: relative to project root (e.g. 'media/house.jpg') or absolute.
-    caption: post caption text.
+    Prefers the dashboard-uploaded media queue (Convex `media_posts`, status
+    "pending") — each file there is posted AT MOST ONCE; on success it's flipped
+    to "posted" so it can never be reused. Call list_media_files first to see
+    what's queued. image_path is only used as a fallback for the legacy
+    project-root media/ folder when nothing is queued.
+
+    Files live in Convex file storage, not on disk — this downloads to a temp
+    file only for the duration of the upload, then deletes it, so the VPS disk
+    never accumulates media.
     """
+    import os
     from pathlib import Path
     from instagram_bot.config.settings import PROJECT_ROOT
 
     page = ctx.page
     dismiss_all_popups(ctx)
 
-    # Resolve path
-    p = Path(image_path)
-    if not p.is_absolute():
-        p = PROJECT_ROOT / image_path
-    if not p.exists():
-        # Auto-pick the first available image in media/ rather than failing outright
-        media_dir = PROJECT_ROOT / "media"
-        candidates = sorted(
-            list(media_dir.glob("*.jpg")) + list(media_dir.glob("*.jpeg")) +
-            list(media_dir.glob("*.png")) + list(media_dir.glob("*.mp4"))
-        )
-        if candidates:
-            p = candidates[0]
-        else:
-            return {"success": False, "reason": f"File not found: {p} and no images in media/ folder"}
+    user_id = os.environ.get("BOT_USER_ID", "default")
+    media_id = None
+    temp_path: str | None = None
 
+    if not image_path:
+        # Pull the oldest not-yet-posted upload for this user from Convex.
+        try:
+            from instagram_bot.db.convex_client import pending_media_posts, download_media_to_temp
+            pending = pending_media_posts(user_id)
+        except Exception:
+            pending = []
+        if not pending:
+            return {
+                "success": False,
+                "reason": "No pending uploads queued. Upload a photo from the dashboard's Posts tab first.",
+            }
+
+        queued = pending[0]
+        media_id = queued["_id"]
+        caption = caption or queued.get("caption", "")
+        suffix = Path(queued.get("original_name", "")).suffix or ".jpg"
+        temp_path = download_media_to_temp(queued["storage_id"], suffix=suffix)
+        if not temp_path:
+            try:
+                from instagram_bot.db.convex_client import mark_media_error
+                mark_media_error(media_id, "Failed to download from Convex storage")
+            except Exception:
+                pass
+            return {"success": False, "reason": "Could not download queued media from storage"}
+        p = Path(temp_path)
+    else:
+        p = Path(image_path)
+        if not p.is_absolute():
+            p = PROJECT_ROOT / image_path
+        if not p.exists():
+            return {"success": False, "reason": f"File not found: {p}"}
+
+    try:
+        result = _upload_and_share(page, p, caption)
+    finally:
+        # Always clean up the temp download — never leave media on VPS disk.
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+
+    if media_id:
+        try:
+            if result.get("success"):
+                from instagram_bot.db.convex_client import mark_media_posted
+                mark_media_posted(media_id, post_url=page.url)
+            else:
+                from instagram_bot.db.convex_client import mark_media_error, upload_error_screenshot
+                screenshot_id = None
+                try:
+                    screenshot_id = upload_error_screenshot(page.screenshot())
+                except Exception:
+                    pass
+                mark_media_error(
+                    media_id,
+                    result.get("reason", "Unknown error"),
+                    error_screenshot_id=screenshot_id,
+                )
+        except Exception:
+            pass
+
+    return result
+
+
+def _upload_and_share(page, p, caption: str) -> dict:
+    """Drive Instagram's Create dialog: select file, advance steps, caption, share."""
     # ── Step 1: Click the Create (+) button in the sidebar ───────────────────
     create_selectors = [
         'svg[aria-label="New post"]',
@@ -808,10 +906,25 @@ def post_photo(ctx: ToolContext, image_path: str, caption: str = "") -> dict:
         pass
     wait_human(1, 2)
 
-    # ── Step 3: Advance through Crop → Filters → Caption (click Next twice) ──
-    # All clicks scoped to the dialog so we never accidentally hit background buttons
+    # ── Step 3: Advance through Crop → Filters → Caption ─────────────────────
+    # The number of "Next" steps isn't fixed (IG sometimes inserts an extra
+    # step, e.g. an accessibility/alt-text screen) — clicking exactly twice
+    # was brittle and silently landed on the wrong step. Instead, click Next
+    # repeatedly, scoped to the dialog, until either the caption box or the
+    # Share button becomes visible (we've reached the final step).
+    dialog = page.locator('div[role="dialog"]').first
+
+    def _at_caption_step() -> bool:
+        try:
+            return dialog.locator(
+                'div[aria-label*="caption" i][contenteditable="true"], '
+                'textarea[aria-label*="caption" i], '
+                'div[role="button"]:has-text("Share"), button:has-text("Share")'
+            ).first.is_visible(timeout=1500)
+        except Exception:
+            return False
+
     def _click_dialog_next() -> bool:
-        dialog = page.locator('div[role="dialog"]').first
         for sel in [
             'div[role="button"]:has-text("Next")',
             'button:has-text("Next")',
@@ -826,13 +939,17 @@ def post_photo(ctx: ToolContext, image_path: str, caption: str = "") -> dict:
                 continue
         return False
 
-    # Click Next: Crop → Filters
-    if not _click_dialog_next():
-        return {"success": False, "reason": "Next button not found at Crop step"}
+    steps_clicked = 0
+    while not _at_caption_step() and steps_clicked < 5:
+        if not _click_dialog_next():
+            break
+        steps_clicked += 1
 
-    # Click Next: Filters → Caption
-    if not _click_dialog_next():
-        return {"success": False, "reason": "Next button not found at Filters step"}
+    if not _at_caption_step():
+        return {
+            "success": False,
+            "reason": f"Never reached the caption/Share step after {steps_clicked} Next click(s)",
+        }
 
     # ── Step 4: Type the caption ──────────────────────────────────────────────
     if caption:
@@ -863,8 +980,46 @@ def post_photo(ctx: ToolContext, image_path: str, caption: str = "") -> dict:
             share_btn = dialog.locator(sel).first
             if share_btn.is_visible(timeout=6000):
                 share_btn.click(force=True)
-                # Wait for Instagram to upload and navigate away from dialog
-                wait_human(4, 6)
+                # After Share, Instagram shows a "Sharing" spinner and then a
+                # "Post shared / Your post has been shared." confirmation screen
+                # with a "Done" button — the dialog element itself never becomes
+                # hidden on its own (confirmed by direct observation), so waiting
+                # for state="hidden" blocks forever even on a genuine success.
+                # Poll for the confirmation text instead, then click Done.
+                confirmed = False
+                for _ in range(24):  # up to ~72s (24 * 3s)
+                    try:
+                        if dialog.count() == 0:
+                            confirmed = True  # dialog closed on its own
+                            break
+                        text = dialog.inner_text(timeout=2000)
+                        if "shared" in text.lower() or "post shared" in text.lower():
+                            confirmed = True
+                            break
+                    except Exception:
+                        pass
+                    wait_human(2.5, 3.5)
+
+                if not confirmed:
+                    return {
+                        "success": False,
+                        "reason": "Share was clicked but no share confirmation appeared "
+                                   "(upload may still be processing or failed) — not "
+                                   "confirmed posted",
+                        "image": str(p),
+                    }
+
+                # Dismiss the confirmation dialog so it doesn't block the next action.
+                for done_sel in ['div[role="button"]:has-text("Done")', 'button:has-text("Done")']:
+                    try:
+                        done_btn = dialog.locator(done_sel).first
+                        if done_btn.is_visible(timeout=3000):
+                            done_btn.click(force=True)
+                            wait_human(1, 2)
+                            break
+                    except Exception:
+                        continue
+
                 return {"success": True, "posted": True, "image": str(p.name), "caption": caption[:100]}
         except Exception:
             continue
@@ -873,17 +1028,27 @@ def post_photo(ctx: ToolContext, image_path: str, caption: str = "") -> dict:
 
 
 def list_media_files(ctx: ToolContext) -> dict:
-    """Return all image/video files in the project's media/ folder."""
-    from instagram_bot.config.settings import PROJECT_ROOT
-    media_dir = PROJECT_ROOT / "media"
-    if not media_dir.exists():
-        return {"files": [], "note": "media/ folder does not exist — create it and add images there"}
-    exts = {".jpg", ".jpeg", ".png", ".gif", ".mp4", ".mov"}
-    files = sorted(p.name for p in media_dir.iterdir() if p.suffix.lower() in exts)
+    """Return media uploaded from the dashboard's Posts tab and not yet posted.
+
+    Each entry is posted at most once — call post_photo() with no image_path to
+    post the oldest pending one; it's automatically marked "posted" afterward.
+    """
+    import os
+    from instagram_bot.db.convex_client import pending_media_posts
+
+    user_id = os.environ.get("BOT_USER_ID", "default")
+    pending = pending_media_posts(user_id)
+    if not pending:
+        return {
+            "files": [],
+            "note": "No pending uploads. The user needs to upload a photo from the dashboard's Posts tab first.",
+        }
     return {
-        "files": files,
-        "folder": str(media_dir),
-        "note": "Pass one of these filenames as image_path to post_photo, e.g. 'media/filename.jpg'",
+        "files": [
+            {"name": p.get("original_name"), "caption": p.get("caption", "")}
+            for p in pending
+        ],
+        "note": "Call post_photo() with no image_path — it posts the oldest pending upload and marks it posted.",
     }
 
 
